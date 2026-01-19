@@ -1,0 +1,237 @@
+"""
+Lumina Studio - Color Extractor Module
+颜色提取模块
+"""
+
+import os
+import numpy as np
+import cv2
+import gradio as gr
+
+from config import (
+    ColorSystem,
+    PHYSICAL_GRID_SIZE,
+    DATA_GRID_SIZE,
+    DST_SIZE,
+    CELL_SIZE,
+    LUT_FILE_PATH
+)
+from utils import Stats
+
+
+def generate_simulated_reference():
+    """Generate reference image for visual comparison."""
+    colors = {
+        0: np.array([250, 250, 250]),
+        1: np.array([220, 20, 60]),
+        2: np.array([255, 230, 0]),
+        3: np.array([0, 100, 240])
+    }
+
+    ref_img = np.zeros((DATA_GRID_SIZE, DATA_GRID_SIZE, 3), dtype=np.uint8)
+    for i in range(1024):
+        digits = []
+        temp = i
+        for _ in range(5):
+            digits.append(temp % 4)
+            temp //= 4
+        stack = digits[::-1]
+
+        mixed = sum(colors[mid] for mid in stack) / 5.0
+        ref_img[i // DATA_GRID_SIZE, i % DATA_GRID_SIZE] = mixed.astype(np.uint8)
+
+    return cv2.resize(ref_img, (512, 512), interpolation=cv2.INTER_NEAREST)
+
+
+def rotate_image(img, direction):
+    if img is None:
+        return None
+    if direction == "左旋 90°":
+        return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    elif direction == "右旋 90°":
+        return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    return img
+
+
+def draw_corner_points(img, points, color_mode: str):
+    """Draw corner points with mode-specific colors and labels."""
+    if img is None:
+        return None
+
+    vis = img.copy()
+    color_conf = ColorSystem.get(color_mode)
+    labels = color_conf['corner_labels']
+
+    # Define colors for drawing (BGR for OpenCV)
+    if "CMYW" in color_mode:
+        draw_colors = [
+            (255, 255, 255),  # White
+            (214, 134, 0),    # Cyan (BGR)
+            (140, 0, 236),    # Magenta (BGR)
+            (42, 238, 244)    # Yellow (BGR)
+        ]
+    else:  # RYBW
+        draw_colors = [
+            (255, 255, 255),  # White
+            (60, 20, 220),    # Red (BGR)
+            (240, 100, 0),    # Blue (BGR)
+            (0, 230, 255)     # Yellow (BGR)
+        ]
+
+    for i, pt in enumerate(points):
+        color = draw_colors[i] if i < 4 else (0, 255, 0)
+
+        # Draw filled circle
+        cv2.circle(vis, (int(pt[0]), int(pt[1])), 15, color, -1)
+        # Draw outline
+        cv2.circle(vis, (int(pt[0]), int(pt[1])), 15, (0, 0, 0), 2)
+        # Draw number
+        cv2.putText(vis, str(i + 1), (int(pt[0]) + 20, int(pt[1]) + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+
+        # Draw label
+        if i < 4:
+            cv2.putText(vis, labels[i], (int(pt[0]) + 20, int(pt[1]) + 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
+    return vis
+
+
+def apply_auto_white_balance(img):
+    h, w, _ = img.shape
+    m = 50
+    corners = [img[0:m, 0:m], img[0:m, w-m:w], img[h-m:h, 0:m], img[h-m:h, w-m:w]]
+    avg_white = sum(c.mean(axis=(0, 1)) for c in corners) / 4.0
+    gain = np.array([255, 255, 255]) / (avg_white + 1e-5)
+    return np.clip(img.astype(float) * gain, 0, 255).astype(np.uint8)
+
+
+def apply_brightness_correction(img):
+    h, w, _ = img.shape
+    img_lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+    l, a, b = cv2.split(img_lab)
+
+    m = 50
+    tl, tr = l[0:m, 0:m].mean(), l[0:m, w-m:w].mean()
+    bl, br = l[h-m:h, 0:m].mean(), l[h-m:h, w-m:w].mean()
+
+    top = np.linspace(tl, tr, w)
+    bot = np.linspace(bl, br, w)
+    mask = np.array([top * (1 - y/h) + bot * (y/h) for y in range(h)])
+
+    target = (tl + tr + bl + br) / 4.0
+    l_new = np.clip(l.astype(float) * (target / (mask + 1e-5)), 0, 255).astype(np.uint8)
+
+    return cv2.cvtColor(cv2.merge([l_new, a, b]), cv2.COLOR_LAB2RGB)
+
+
+def run_extraction(img, points, offset_x, offset_y, zoom, barrel, wb, bright):
+    """Main extraction pipeline."""
+    if img is None:
+        return None, None, None, "❌ 请先上传图片"
+    if len(points) != 4:
+        return None, None, None, "❌ 请点击4个角点"
+
+    # Perspective transform
+    half = CELL_SIZE / 2.0
+    src = np.float32(points)
+    dst = np.float32([
+        [half, half], [DST_SIZE - half, half],
+        [DST_SIZE - half, DST_SIZE - half], [half, DST_SIZE - half]
+    ])
+
+    M = cv2.getPerspectiveTransform(src, dst)
+    warped = cv2.warpPerspective(img, M, (DST_SIZE, DST_SIZE))
+
+    if wb:
+        warped = apply_auto_white_balance(warped)
+    if bright:
+        warped = apply_brightness_correction(warped)
+
+    # Sampling
+    extracted = np.zeros((DATA_GRID_SIZE, DATA_GRID_SIZE, 3), dtype=np.uint8)
+    vis = warped.copy()
+
+    for r in range(DATA_GRID_SIZE):
+        for c in range(DATA_GRID_SIZE):
+            phys_r, phys_c = r + 1, c + 1
+            nx = (phys_c + 0.5) / PHYSICAL_GRID_SIZE * 2 - 1
+            ny = (phys_r + 0.5) / PHYSICAL_GRID_SIZE * 2 - 1
+
+            rad = np.sqrt(nx**2 + ny**2)
+            k = 1 + barrel * (rad**2)
+            dx, dy = nx * k * zoom, ny * k * zoom
+
+            cx = (dx + 1) / 2 * DST_SIZE + offset_x
+            cy = (dy + 1) / 2 * DST_SIZE + offset_y
+
+            if 0 <= cx < DST_SIZE and 0 <= cy < DST_SIZE:
+                x0, y0 = int(max(0, cx - 4)), int(max(0, cy - 4))
+                x1, y1 = int(min(DST_SIZE, cx + 4)), int(min(DST_SIZE, cy + 4))
+                reg = warped[y0:y1, x0:x1]
+                avg = reg.mean(axis=(0, 1)).astype(int) if reg.size > 0 else [0, 0, 0]
+                cv2.drawMarker(vis, (int(cx), int(cy)), (0, 255, 0), cv2.MARKER_CROSS, 8, 1)
+            else:
+                avg = [0, 0, 0]
+            extracted[r, c] = avg
+
+    np.save(LUT_FILE_PATH, extracted)
+    prev = cv2.resize(extracted, (512, 512), interpolation=cv2.INTER_NEAREST)
+
+    Stats.increment("extractions")
+
+    return vis, prev, LUT_FILE_PATH, "✅ 提取完成！LUT已保存"
+
+
+def probe_lut_cell(evt: gr.SelectData):
+    if not os.path.exists(LUT_FILE_PATH):
+        return "⚠️ 无数据", None, None
+    try:
+        lut = np.load(LUT_FILE_PATH)
+    except:
+        return "⚠️ 数据损坏", None, None
+
+    x, y = evt.index
+    scale = 512 / DATA_GRID_SIZE
+    c = min(max(int(x / scale), 0), DATA_GRID_SIZE - 1)
+    r = min(max(int(y / scale), 0), DATA_GRID_SIZE - 1)
+
+    rgb = lut[r, c]
+    hex_c = '#{:02x}{:02x}{:02x}'.format(*rgb)
+
+    html = f"""
+    <div style='background:#1a1a2e; padding:10px; border-radius:8px; color:white;'>
+        <b>行 {r+1} / 列 {c+1}</b><br>
+        <div style='background:{hex_c}; width:60px; height:30px; border:2px solid white; 
+             display:inline-block; vertical-align:middle; border-radius:4px;'></div>
+        <span style='margin-left:10px; font-family:monospace;'>{hex_c}</span>
+    </div>
+    """
+    return html, hex_c, (r, c)
+
+
+def manual_fix_cell(coord, color_input):
+    if not coord or not os.path.exists(LUT_FILE_PATH):
+        return None, "⚠️ 错误"
+
+    try:
+        lut = np.load(LUT_FILE_PATH)
+        r, c = coord
+        new_color = [0, 0, 0]
+
+        color_str = str(color_input)
+        if color_str.startswith('rgb'):
+            clean = color_str.replace('rgb', '').replace('a', '').replace('(', '').replace(')', '')
+            parts = clean.split(',')
+            if len(parts) >= 3:
+                new_color = [int(float(p.strip())) for p in parts[:3]]
+        elif color_str.startswith('#'):
+            hex_s = color_str.lstrip('#')
+            new_color = [int(hex_s[i:i+2], 16) for i in (0, 2, 4)]
+        else:
+            new_color = [int(color_str[i:i+2], 16) for i in (0, 2, 4)]
+
+        lut[r, c] = new_color
+        np.save(LUT_FILE_PATH, lut)
+        return cv2.resize(lut, (512, 512), interpolation=cv2.INTER_NEAREST), "✅ 已修正"
+    except Exception as e:
+        return None, f"❌ 格式错误: {color_input}"
