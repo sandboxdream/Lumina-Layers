@@ -93,7 +93,6 @@ Converts images into printable 3D models using the calibrated data.
 | 🎮 **Live 3D Preview** | Interactive preview with actual LUT-matched colors |
 | 🌐 **Bilingual UI** | Chinese/English labels throughout the interface |
 | 📏 **Optimized Gap** | Default gap changed to 0.82mm for standard line widths |
-| 📦 **Unified App** | All three tools merged into single `LuminaStudio.py` |
 
 ---
 
@@ -151,7 +150,7 @@ pip install -r requirements.txt
 
 ### Quick Start
 ```bash
-python LuminaStudio.py
+python main.py
 ```
 This launches the web interface with all three modules in tabs.
 
