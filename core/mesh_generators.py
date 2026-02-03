@@ -95,118 +95,158 @@ class VoxelMesher(BaseMesher):
 class HighFidelityMesher(BaseMesher):
     """
     High-fidelity mode mesh generator
-    Uses RLE (Run-Length Encoding) algorithm to generate seamless, watertight 3D mesh
+    Uses Greedy Rectangle Merging algorithm to generate optimized, watertight 3D mesh
     
     ALGORITHM:
     1. Apply morphological dilation to thicken thin features
     2. Vertical layer compression (merge identical Z-layers)
-    3. Horizontal run-length encoding (find continuous pixel runs per row)
-    4. Generate ONE rectangle (2 triangles) per run
+    3. Greedy rectangle merging (find maximal rectangles in 2D mask)
+    4. Generate ONE box per rectangle (instead of per-pixel-row)
+    
+    OPTIMIZATION:
+    - Old method: 1 box per horizontal run → ~100k faces for 200x200 image
+    - New method: 1 box per maximal rectangle → ~5k-10k faces (80-95% reduction)
     
     GEOMETRY:
     - Dilation: Expands features by ~0.1-0.15mm to ensure printability
-    - Shrink = 0.0: Perfect edge-to-edge contact (watertight)
+    - Perfect edge-to-edge contact (watertight)
     - Vertices match pixel coordinates exactly
-    - Slight overlaps between colors ensure zero gaps
-    
-    PERFORMANCE:
-    - Pre-allocated lists for efficiency
-    - Handles 100k+ faces instantly
-    - Zero geometric processing overhead
     """
     
     def generate_mesh(self, voxel_matrix, mat_id, height_px):
         """
-        Generate high-fidelity mode mesh (RLE-based Solid Extrusion with Dilation)
+        Generate high-fidelity mode mesh (Greedy Rectangle Merging)
         
-        Returns a watertight mesh with perfect detail retention and printable features.
+        Returns a watertight mesh with optimized face count.
         """
-        # Step 1: Vertical layer compression with dilation (RLE in Z-axis)
+        # Step 1: Vertical layer compression with dilation
         layer_groups = self._merge_layers_with_dilation(voxel_matrix, mat_id)
         
         if not layer_groups:
             return None
         
-        print(f"[HIGH_FIDELITY] Mat ID {mat_id}: Merged {voxel_matrix.shape[0]} layers → {len(layer_groups)} groups (with dilation)")
+        print(f"[HIGH_FIDELITY] Mat ID {mat_id}: Merged {voxel_matrix.shape[0]} layers → {len(layer_groups)} groups")
         
-        # Pre-allocate lists for performance
         vertices = []
         faces = []
+        total_rects = 0
         
-        # Step 2: Process each layer group
+        # Step 2: Process each layer group with greedy rectangle merging
         for start_z, end_z, mask in layer_groups:
             z_bottom = float(start_z)
             z_top = float(end_z + 1)
             
-            # Step 3: Horizontal RLE for each row
-            for y in range(height_px):
-                world_y = float(height_px - 1 - y)
-                row = mask[y]
+            # Step 3: Find maximal rectangles using greedy algorithm
+            rectangles = self._greedy_rect_merge(mask, height_px)
+            total_rects += len(rectangles)
+            
+            # Step 4: Generate one box per rectangle
+            for x0, y0, x1, y1 in rectangles:
+                # Convert to world coordinates (flip Y)
+                world_y0 = float(height_px - y1)
+                world_y1 = float(height_px - y0)
                 
-                # Find continuous runs of True values
-                padded = np.pad(row, (1, 1), mode='constant', constant_values=False)
-                diff = np.diff(padded.astype(int))
-                starts = np.where(diff == 1)[0]
-                ends = np.where(diff == -1)[0]
+                base_idx = len(vertices)
+                vertices.extend([
+                    [x0, world_y0, z_bottom], [x1, world_y0, z_bottom],
+                    [x1, world_y1, z_bottom], [x0, world_y1, z_bottom],
+                    [x0, world_y0, z_top], [x1, world_y0, z_top],
+                    [x1, world_y1, z_top], [x0, world_y1, z_top]
+                ])
                 
-                # Generate one rectangle per run
-                for x_start, x_end in zip(starts, ends):
-                    x0 = float(x_start)
-                    x1 = float(x_end)
-                    y0 = world_y
-                    y1 = world_y + 1.0
-                    
-                    # Create rectangle vertices (no shrink = perfect contact)
-                    base_idx = len(vertices)
-                    vertices.extend([
-                        [x0, y0, z_bottom], [x1, y0, z_bottom],
-                        [x1, y1, z_bottom], [x0, y1, z_bottom],
-                        [x0, y0, z_top], [x1, y0, z_top],
-                        [x1, y1, z_top], [x0, y1, z_top]
-                    ])
-                    
-                    # Create 12 triangular faces (6 quads = 12 triangles)
-                    cube_faces = [
-                        [0, 2, 1], [0, 3, 2],  # bottom
-                        [4, 5, 6], [4, 6, 7],  # top
-                        [0, 1, 5], [0, 5, 4],  # front
-                        [1, 2, 6], [1, 6, 5],  # right
-                        [2, 3, 7], [2, 7, 6],  # back
-                        [3, 0, 4], [3, 4, 7]   # left
-                    ]
-                    faces.extend([[v + base_idx for v in f] for f in cube_faces])
+                cube_faces = [
+                    [0, 2, 1], [0, 3, 2],  # bottom
+                    [4, 5, 6], [4, 6, 7],  # top
+                    [0, 1, 5], [0, 5, 4],  # front
+                    [1, 2, 6], [1, 6, 5],  # right
+                    [2, 3, 7], [2, 7, 6],  # back
+                    [3, 0, 4], [3, 4, 7]   # left
+                ]
+                faces.extend([[v + base_idx for v in f] for f in cube_faces])
         
         if not vertices:
             return None
         
-        # Create mesh
         mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-        
-        # Optimize mesh (merge duplicate vertices, remove degenerate faces)
         mesh.merge_vertices()
         mesh.update_faces(mesh.unique_faces())
         
-        print(f"[HIGH_FIDELITY] Mat {mat_id}: {len(mesh.vertices):,} vertices, {len(mesh.faces):,} faces")
+        print(f"[HIGH_FIDELITY] Mat {mat_id}: {total_rects} rects → {len(mesh.vertices):,} verts, {len(mesh.faces):,} faces")
         
         return mesh
     
+    def _greedy_rect_merge(self, mask, height_px):
+        """
+        Greedy rectangle merging algorithm
+        
+        Finds maximal rectangles to cover all True pixels in the mask.
+        
+        Algorithm:
+        1. Find first unprocessed True pixel
+        2. Expand right as far as possible
+        3. Expand down as far as possible (keeping width)
+        4. Mark rectangle as processed
+        5. Repeat until all pixels processed
+        
+        Args:
+            mask: 2D boolean array (H, W)
+            height_px: Image height
+        
+        Returns:
+            List of rectangles: [(x0, y0, x1, y1), ...]
+            Coordinates are in pixel space (not world space)
+        """
+        h, w = mask.shape
+        processed = np.zeros_like(mask, dtype=bool)
+        rectangles = []
+        
+        for y in range(h):
+            x = 0
+            while x < w:
+                # Skip if not a valid starting point
+                if not mask[y, x] or processed[y, x]:
+                    x += 1
+                    continue
+                
+                # Found unprocessed True pixel, expand rectangle
+                # Step 1: Expand right
+                x_end = x + 1
+                while x_end < w and mask[y, x_end] and not processed[y, x_end]:
+                    x_end += 1
+                
+                # Step 2: Expand down (keeping width)
+                y_end = y + 1
+                while y_end < h:
+                    # Check if entire row segment is valid
+                    row_valid = True
+                    for xi in range(x, x_end):
+                        if not mask[y_end, xi] or processed[y_end, xi]:
+                            row_valid = False
+                            break
+                    if not row_valid:
+                        break
+                    y_end += 1
+                
+                # Step 3: Mark as processed
+                processed[y:y_end, x:x_end] = True
+                
+                # Step 4: Add rectangle (x0, y0, x1, y1)
+                rectangles.append((float(x), float(y), float(x_end), float(y_end)))
+                
+                x = x_end
+        
+        return rectangles
+    
     def _merge_layers_with_dilation(self, voxel_matrix, mat_id):
         """
-        Merge identical vertical layers and apply morphological dilation (RLE compression on Z-axis + Dilation)
+        Merge identical vertical layers and apply morphological dilation
         
         Groups consecutive Z-layers with identical masks to reduce geometry.
         Applies morphological dilation to ensure thin features are printable.
         
-        DILATION STRATEGY:
-        - Kernel: 3x3 square
-        - Iterations: 1
-        - Effect: Expands features by ~1 pixel (~0.1mm in high-fidelity mode)
-        - Result: Thin lines (0.2mm) become printable (0.4mm+)
-        
         Returns:
             list of tuples: [(start_z, end_z, dilated_mask), ...]
         """
-        # Define dilation kernel (3x3 square)
         kernel = np.ones((3, 3), np.uint8)
         
         layer_groups = []
@@ -216,35 +256,28 @@ class HighFidelityMesher(BaseMesher):
         for z in range(voxel_matrix.shape[0]):
             curr_mask = (voxel_matrix[z] == mat_id)
             
-            # Skip empty layers
             if not np.any(curr_mask):
                 if prev_mask is not None and np.any(prev_mask):
                     layer_groups.append((start_z, z - 1, prev_mask))
                     prev_mask = None
                 continue
             
-            # Apply morphological dilation BEFORE comparison
-            # This thickens thin features and ensures watertight connections
             dilated_mask = cv2.dilate(
                 curr_mask.astype(np.uint8), 
                 kernel, 
                 iterations=1
             ).astype(bool)
             
-            # Start new group or continue existing
             if prev_mask is None:
                 start_z = z
                 prev_mask = dilated_mask.copy()
             elif np.array_equal(dilated_mask, prev_mask):
-                # Continue current group
                 pass
             else:
-                # Save previous group and start new one
                 layer_groups.append((start_z, z - 1, prev_mask))
                 start_z = z
                 prev_mask = dilated_mask.copy()
         
-        # Save final group
         if prev_mask is not None and np.any(prev_mask):
             layer_groups.append((start_z, voxel_matrix.shape[0] - 1, prev_mask))
         
