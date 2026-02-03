@@ -3,7 +3,15 @@ Lumina Studio - UI Layout (Refactored with i18n)
 UI layout definition - Refactored version with language switching support
 """
 
+import json
+import os
+import shutil
+import time
+import zipfile
+from pathlib import Path
+
 import gradio as gr
+from PIL import Image as PILImage
 
 from core.i18n import I18n
 from config import ColorSystem
@@ -15,7 +23,6 @@ from core.extractor import (
     run_extraction,
     probe_lut_cell,
     manual_fix_cell,
-    generate_simulated_reference
 )
 from core.converter import (
     generate_preview_cached,
@@ -38,40 +45,333 @@ from .callbacks import (
     on_lut_upload_save
 )
 
+# Runtime-injected i18n keys (avoids editing core/i18n.py).
+if hasattr(I18n, 'TEXTS'):
+    I18n.TEXTS.update({
+        'conv_advanced': {'zh': '🛠️ 高级设置', 'en': '🛠️ Advanced Settings'},
+        'conv_stop':     {'zh': '🛑 停止生成', 'en': '🛑 Stop Generation'},
+        'conv_batch_mode':      {'zh': '📦 批量模式', 'en': '📦 Batch Mode'},
+        'conv_batch_mode_info': {'zh': '一次生成多个模型 (参数共享)', 'en': 'Generate multiple models (Shared Settings)'},
+        'conv_batch_input':     {'zh': '📤 批量上传图片', 'en': '📤 Batch Upload Images'},
+        'conv_lut_status': {'zh': '💡 拖放.npy文件自动添加', 'en': '💡 Drop .npy file to load'},
+    })
 
-# ========== Mode Mapping Helper ==========
+CONFIG_FILE = "user_settings.json"
+
+
+def load_last_lut_setting():
+    """Load the last selected LUT name from the user settings file.
+
+    Returns:
+        str | None: LUT name if found, else None.
+    """
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get("last_lut", None)
+        except Exception as e:
+            print(f"Failed to load settings: {e}")
+    return None
+
+
+def save_last_lut_setting(lut_name):
+    """Persist the current LUT selection to the user settings file.
+
+    Args:
+        lut_name: Display name of the selected LUT (or None to clear).
+    """
+    data = {}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            pass
+
+    data["last_lut"] = lut_name
+
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Failed to save settings: {e}")
+
+
+# ---------- Header and layout CSS ----------
+HEADER_CSS = """
+/* Full-width container */
+.gradio-container {
+    max-width: 100% !important;
+    width: 100% !important;
+    padding-left: 20px !important;
+    padding-right: 20px !important;
+}
+
+/* Header row with rounded corners */
+.header-row {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    padding: 15px 20px;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    width: 100% !important;
+    border-radius: 16px !important;
+    overflow: hidden !important;
+    margin-bottom: 15px !important;
+    align-items: center;
+    box-shadow: 0 4px 15px rgba(102, 126, 234, 0.2) !important;
+}
+
+.header-row h1 {
+    color: white !important;
+    margin: 0 !important;
+    font-size: 24px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.header-row p {
+    color: rgba(255,255,255,0.8) !important;
+    margin: 0 !important;
+    font-size: 14px;
+}
+
+/* Left sidebar */
+.left-sidebar {
+    background-color: #f9fafb;
+    padding: 15px;
+    border-radius: 8px;
+    border: 1px solid #e5e7eb;
+    height: 100%;
+}
+
+.compact-row {
+    margin-top: -10px !important;
+    margin-bottom: -10px !important;
+    gap: 10px;
+}
+
+.micro-upload {
+    min-height: 40px !important;
+}
+
+/* Workspace area */
+.workspace-area {
+    padding: 0 10px;
+}
+
+/* Action buttons */
+.action-buttons {
+    margin-top: 15px;
+    margin-bottom: 15px;
+}
+
+/* Upload box height aligned with dropdown row */
+.tall-upload {
+    height: 84px !important;
+    min-height: 84px !important;
+    max-height: 84px !important;
+    background-color: #ffffff !important;
+    border-radius: 8px !important;
+    border: 1px dashed #e5e7eb !important;
+    overflow: hidden !important;
+    padding: 0 !important;
+}
+
+/* Inner layout for upload area */
+.tall-upload .wrap {
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: center !important;
+    align-items: center !important;
+    padding: 2px !important;
+    height: 100% !important;
+}
+
+/* Smaller font in upload area */
+.tall-upload .icon-wrap { display: none !important; }
+.tall-upload span,
+.tall-upload div {
+    font-size: 12px !important;
+    line-height: 1.3 !important;
+    color: #6b7280 !important;
+    text-align: center !important;
+    margin: 0 !important;
+}
+
+/* LUT status card style */
+.lut-status {
+    margin-top: 10px !important;
+    padding: 8px 12px !important;
+    background: #ffffff !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 8px !important;
+    color: #4b5563 !important;
+    font-size: 13px !important;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    min-height: 36px !important;
+    display: flex !important;
+    align-items: center !important;
+}
+.lut-status p {
+    margin: 0 !important;
+}
+
+/* Transparent group (no box) */
+.clean-group {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+
+/* Modeling mode radio text color (avoid theme override) */
+.vertical-radio label span {
+    color: #374151 !important;
+    font-weight: 500 !important;
+}
+
+/* Selected state text color */
+.vertical-radio input:checked + span,
+.vertical-radio label.selected span {
+    color: #1f2937 !important;
+}
+"""
+
+
+# ---------- Image size and aspect-ratio helpers ----------
+
+def _get_image_size(img):
+    """Get image dimensions (width, height). Supports file path or numpy array.
+
+    Args:
+        img: File path (str) or numpy array (H, W, C).
+
+    Returns:
+        tuple[int, int] | None: (width, height) in pixels, or None.
+    """
+    if img is None:
+        return None
+
+    try:
+        if isinstance(img, str):
+            if img.lower().endswith('.svg'):
+                try:
+                    from svglib.svglib import svg2rlg
+                    drawing = svg2rlg(img)
+                    return (drawing.width, drawing.height)
+                except ImportError:
+                    print("⚠️ svglib not installed, cannot read SVG size")
+                    return None
+                except Exception as e:
+                    print(f"⚠️ Error reading SVG size: {e}")
+                    return None
+            
+            with PILImage.open(img) as i:
+                return i.size
+
+        elif hasattr(img, 'shape'):
+            return (img.shape[1], img.shape[0])
+    except Exception as e:
+        print(f"Error getting image size: {e}")
+        return None
+    
+    return None
+
+
+def calc_height_from_width(width, img):
+    """Compute height (mm) from width (mm) preserving aspect ratio.
+
+    Args:
+        width: Target width in mm.
+        img: Image path or array for dimensions.
+
+    Returns:
+        float | gr.update: Height in mm, or gr.update() if unknown.
+    """
+    size = _get_image_size(img)
+    if size is None or width is None:
+        return gr.update()
+    
+    w_px, h_px = size
+    if w_px == 0:
+        return 0
+    
+    ratio = h_px / w_px
+    return round(width * ratio, 1)
+
+
+def calc_width_from_height(height, img):
+    """Compute width (mm) from height (mm) preserving aspect ratio.
+
+    Args:
+        height: Target height in mm.
+        img: Image path or array for dimensions.
+
+    Returns:
+        float | gr.update: Width in mm, or gr.update() if unknown.
+    """
+    size = _get_image_size(img)
+    if size is None or height is None:
+        return gr.update()
+    
+    w_px, h_px = size
+    if h_px == 0:
+        return 0
+    
+    ratio = w_px / h_px
+    return round(height * ratio, 1)
+
+
+def init_dims(img):
+    """Compute default width/height (mm) from image aspect ratio.
+
+    Args:
+        img: Image path or array.
+
+    Returns:
+        tuple[float, float]: (default_width_mm, default_height_mm).
+    """
+    size = _get_image_size(img)
+    if size is None:
+        return 60, 60
+    
+    w_px, h_px = size
+    default_w = 60
+    default_h = round(default_w * (h_px / w_px), 1)
+    return default_w, default_h
+
+
+# ---------- Mode mapping ----------
 
 def map_modeling_mode(mode_display_text):
-    """
-    Map UI display text to internal mode string.
-    
+    """Map UI modeling mode label to internal mode identifier.
+
     Args:
-        mode_display_text: Display text from UI (e.g., "🎨 高保真（平滑）")
-        
+        mode_display_text: Label from UI (e.g. "High-Fidelity", "Pixel", "Vector").
+
     Returns:
-        Internal mode string ("high-fidelity", "pixel", or "vector_native")
+        str: One of "high-fidelity", "pixel", "vector_native".
     """
-    mode_lower = mode_display_text.lower()
-    
+    mode_lower = (mode_display_text or "").lower()
     if "vector" in mode_lower or "矢量" in mode_lower:
         return "vector_native"
-    elif "pixel" in mode_lower or "像素" in mode_lower:
+    if "pixel" in mode_lower or "像素" in mode_lower:
         return "pixel"
-    else:  # Default to high-fidelity
-        return "high-fidelity"
+    return "high-fidelity"
 
 
 def generate_final_model_with_mapping(image_path, lut_path, target_width_mm, spacer_thick,
                                       structure_mode, auto_bg, bg_tol, color_mode,
                                       add_loop, loop_width, loop_length, loop_hole, loop_pos,
                                       modeling_mode_display, quantize_colors):
+    """Run final model generation with UI mode label mapped to internal mode.
+
+    Returns:
+        tuple: (out_path, glb_path, preview_img, status_msg) from generate_final_model.
     """
-    Wrapper that maps UI mode display text to internal mode string.
-    """
-    # Map display text to internal mode
     modeling_mode = map_modeling_mode(modeling_mode_display)
-    
-    # Call actual conversion function
     return generate_final_model(
         image_path, lut_path, target_width_mm, spacer_thick,
         structure_mode, auto_bg, bg_tol, color_mode,
@@ -80,18 +380,74 @@ def generate_final_model_with_mapping(image_path, lut_path, target_width_mm, spa
     )
 
 
+def process_batch_generation(batch_files, is_batch, single_image, lut_path, target_width_mm,
+                             spacer_thick, structure_mode, auto_bg, bg_tol, color_mode,
+                             add_loop, loop_width, loop_length, loop_hole, loop_pos,
+                             modeling_mode_display, quantize_colors, progress=gr.Progress()):
+    """Dispatch to single-image or batch generation; batch writes a ZIP of 3MFs.
+
+    Returns:
+        tuple: (file_or_zip_path, model3d_value, preview_image, status_text).
+    """
+    args = (lut_path, target_width_mm, spacer_thick, structure_mode, auto_bg, bg_tol,
+            color_mode, add_loop, loop_width, loop_length, loop_hole, loop_pos,
+            modeling_mode_display, quantize_colors)
+
+    if not is_batch:
+        return generate_final_model_with_mapping(single_image, *args)
+
+    if not batch_files:
+        return None, None, None, "❌ 请先上传图片 / Please upload images first"
+
+    generated_files = []
+    total_files = len(batch_files)
+    logs = []
+
+    output_dir = os.path.join("outputs", f"batch_{int(time.time())}")
+    os.makedirs(output_dir, exist_ok=True)
+
+    logs.append(f"🚀 开始批量处理 {total_files} 张图片...")
+
+    for i, file_obj in enumerate(batch_files):
+        path = getattr(file_obj, 'name', file_obj) if file_obj else None
+        if not path or not os.path.isfile(path):
+            continue
+        filename = os.path.basename(path)
+        progress(i / total_files, desc=f"Processing {filename}...")
+        logs.append(f"[{i+1}/{total_files}] 正在生成: {filename}")
+
+        try:
+            result_3mf, _, _, _ = generate_final_model_with_mapping(path, *args)
+
+            if result_3mf and os.path.exists(result_3mf):
+                new_name = os.path.splitext(filename)[0] + ".3mf"
+                dest_path = os.path.join(output_dir, new_name)
+                shutil.copy2(result_3mf, dest_path)
+                generated_files.append(dest_path)
+        except Exception as e:
+            logs.append(f"❌ 失败 {filename}: {str(e)}")
+            print(f"Batch error on {filename}: {e}")
+
+    if generated_files:
+        zip_path = os.path.join("outputs", f"Lumina_Batch_{int(time.time())}.zip")
+        with zipfile.ZipFile(zip_path, 'w') as zipf:
+            for f in generated_files:
+                zipf.write(f, os.path.basename(f))
+        logs.append(f"✅ Batch done: {len(generated_files)} model(s).")
+        return zip_path, None, None, "\n".join(logs)
+    return None, None, None, "❌ Batch failed: no valid models.\n" + "\n".join(logs)
+
+
 def create_app():
-    """Create Gradio application interface (with language switching support)"""
+    """Build the Gradio app (tabs, i18n, events) and return the Blocks instance."""
     with gr.Blocks(title="Lumina Studio") as app:
-        
-        # ==================== Language State ====================
-        lang_state = gr.State(value="zh")  # Default Chinese
-        
-        # ==================== Header ====================
-        with gr.Row():
+        lang_state = gr.State(value="zh")
+
+        # Header
+        with gr.Row(elem_classes=["header-row"], equal_height=True):
             with gr.Column(scale=10):
                 app_title_html = gr.HTML(
-                    value=_get_header_html("zh"),
+                    value=f"<h1>✨ Lumina Studio</h1><p>{I18n.get('app_subtitle', 'zh')}</p>",
                     elem_id="app-header"
                 )
             with gr.Column(scale=1, min_width=120):
@@ -101,98 +457,59 @@ def create_app():
                     elem_id="lang-btn"
                 )
         
-        # ==================== Stats Bar ====================
         stats = Stats.get_all()
         stats_html = gr.HTML(
             value=_get_stats_html("zh", stats),
             elem_id="stats-bar"
         )
         
-        # ==================== Main Tabs ====================
-        # Create tab container (to store tab components)
         tab_components = {}
-        
         with gr.Tabs() as tabs:
-            # Store all components that need updating
             components = {}
-            
-            # Tab 1: Image Converter
+
+            # Converter tab
             with gr.TabItem(label=I18n.get('tab_converter', "zh"), id=0) as tab_conv:
                 conv_components = create_converter_tab_content("zh")
                 components.update(conv_components)
             tab_components['tab_converter'] = tab_conv
             
-            # Tab 2: Calibration Board Generator
             with gr.TabItem(label=I18n.get('tab_calibration', "zh"), id=1) as tab_cal:
                 cal_components = create_calibration_tab_content("zh")
                 components.update(cal_components)
             tab_components['tab_calibration'] = tab_cal
             
-            # Tab 3: Color Extractor
             with gr.TabItem(label=I18n.get('tab_extractor', "zh"), id=2) as tab_ext:
                 ext_components = create_extractor_tab_content("zh")
                 components.update(ext_components)
             tab_components['tab_extractor'] = tab_ext
             
-            # Tab 4: About
             with gr.TabItem(label=I18n.get('tab_about', "zh"), id=3) as tab_about:
                 about_components = create_about_tab_content("zh")
                 components.update(about_components)
             tab_components['tab_about'] = tab_about
         
-        # ==================== Footer ====================
         footer_html = gr.HTML(
             value=_get_footer_html("zh"),
             elem_id="footer"
         )
         
-        # ==================== Language Switching Logic ====================
         def change_language(current_lang):
-            """Switch language"""
+            """Switch UI language and return updates for all i18n components."""
             new_lang = "en" if current_lang == "zh" else "zh"
-            
-            # Prepare all updates
             updates = []
-            
-            # 1. Update language button
             updates.append(gr.update(value=I18n.get('lang_btn_zh' if new_lang == "zh" else 'lang_btn_en', new_lang)))
-            
-            # 2. Update header
             updates.append(gr.update(value=_get_header_html(new_lang)))
-            
-            # 3. Update stats bar
             stats = Stats.get_all()
             updates.append(gr.update(value=_get_stats_html(new_lang, stats)))
-            
-            # 4. Update tab titles
             updates.append(gr.update(label=I18n.get('tab_converter', new_lang)))
             updates.append(gr.update(label=I18n.get('tab_calibration', new_lang)))
             updates.append(gr.update(label=I18n.get('tab_extractor', new_lang)))
             updates.append(gr.update(label=I18n.get('tab_about', new_lang)))
-            
-            # 5. Update all components
             updates.extend(_get_all_component_updates(new_lang, components))
-            
-            # 6. Update footer
             updates.append(gr.update(value=_get_footer_html(new_lang)))
-            
-            # 7. Update language state
             updates.append(new_lang)
-            
             return updates
-            
-            # 5. Update all components
-            updates.extend(_get_all_component_updates(new_lang, components))
-            
-            # 6. Update footer
-            updates.append(gr.update(value=_get_footer_html(new_lang)))
-            
-            # 7. Update language state
-            updates.append(new_lang)
-            
-            return updates
-        
-        # Bind language switching event
+
         output_list = [
             lang_btn,
             app_title_html,
@@ -202,36 +519,33 @@ def create_app():
             tab_components['tab_extractor'],
             tab_components['tab_about'],
         ]
-        
-        # Add all components to output list
         output_list.extend(_get_component_list(components))
-        
-        # Add footer and language state
         output_list.extend([footer_html, lang_state])
-        
+
         lang_btn.click(
             change_language,
             inputs=[lang_state],
             outputs=output_list
         )
-    
+
+        app.load(
+            fn=on_lut_select,
+            inputs=[components['dropdown_conv_lut_dropdown']],
+            outputs=[components['state_conv_lut_path'], components['md_conv_lut_status']]
+        )
+
     return app
 
 
-# ==================== Helper Functions ====================
+# ---------- Helpers for i18n updates ----------
 
 def _get_header_html(lang: str) -> str:
-    """Generate header HTML"""
-    return f"""
-    <div class="header-banner">
-        <h1>{I18n.get('app_title', lang)}</h1>
-        <p>{I18n.get('app_subtitle', lang)}</p>
-    </div>
-    """
+    """Return header HTML (title + subtitle) for the given language."""
+    return f"<h1>✨ Lumina Studio</h1><p>{I18n.get('app_subtitle', lang)}</p>"
 
 
 def _get_stats_html(lang: str, stats: dict) -> str:
-    """Generate stats bar HTML"""
+    """Return stats bar HTML (calibrations / extractions / conversions)."""
     return f"""
     <div class="stats-bar">
         {I18n.get('stats_total', lang)}: 
@@ -243,7 +557,7 @@ def _get_stats_html(lang: str, stats: dict) -> str:
 
 
 def _get_footer_html(lang: str) -> str:
-    """Generate footer HTML"""
+    """Return footer HTML for the given language."""
     return f"""
     <div class="footer">
         <p>{I18n.get('footer_tip', lang)}</p>
@@ -252,38 +566,39 @@ def _get_footer_html(lang: str) -> str:
 
 
 def _get_all_component_updates(lang: str, components: dict) -> list:
-    """
-    Get update list for all components
-    
+    """Build a list of gr.update() for all components to apply i18n.
+
+    Skips dynamic status components (md_conv_lut_status, textbox_conv_status)
+    so their runtime text is not overwritten.
+
     Args:
-        lang: Target language
-        components: Component dictionary
-    
+        lang: Target language code ('zh' or 'en').
+        components: Dict of component key -> Gradio component.
+
     Returns:
-        list: gr.update() list
+        list: One gr.update() per component, in dict iteration order.
     """
     updates = []
-    
-    # Update in order of component dictionary
     for key, component in components.items():
+        if key == 'md_conv_lut_status' or key == 'textbox_conv_status':
+            updates.append(gr.update())
+            continue
+
         if key.startswith('md_'):
-            # Markdown component
             updates.append(gr.update(value=I18n.get(key[3:], lang)))
         elif key.startswith('lbl_'):
-            # Label component
             updates.append(gr.update(label=I18n.get(key[4:], lang)))
         elif key.startswith('btn_'):
-            # Button component
             updates.append(gr.update(value=I18n.get(key[4:], lang)))
         elif key.startswith('radio_'):
-            # Radio component - need to update choices
             choice_key = key[6:]
             if choice_key == 'conv_color_mode' or choice_key == 'cal_color_mode' or choice_key == 'ext_color_mode':
                 updates.append(gr.update(
                     label=I18n.get(choice_key, lang),
                     choices=[
                         I18n.get('conv_color_mode_cmyw', lang),
-                        I18n.get('conv_color_mode_rybw', lang)
+                        I18n.get('conv_color_mode_rybw', lang),
+                        "6-Color (Smart 1296)"
                     ]
                 ))
             elif choice_key == 'conv_structure':
@@ -301,15 +616,13 @@ def _get_all_component_updates(lang: str, components: dict) -> list:
                     choices=[
                         I18n.get('conv_modeling_mode_hifi', lang),
                         I18n.get('conv_modeling_mode_pixel', lang),
-                        I18n.get('conv_modeling_mode_vector', lang)  # NEW
+                        I18n.get('conv_modeling_mode_vector', lang)
                     ]
                 ))
         elif key.startswith('slider_'):
-            # Slider component
             slider_key = key[7:]
             updates.append(gr.update(label=I18n.get(slider_key, lang)))
         elif key.startswith('checkbox_'):
-            # Checkbox component
             checkbox_key = key[9:]
             info_key = checkbox_key + '_info'
             if info_key in I18n.TEXTS:
@@ -320,7 +633,6 @@ def _get_all_component_updates(lang: str, components: dict) -> list:
             else:
                 updates.append(gr.update(label=I18n.get(checkbox_key, lang)))
         elif key.startswith('dropdown_'):
-            # Dropdown component
             dropdown_key = key[9:]
             info_key = dropdown_key + '_info'
             if info_key in I18n.TEXTS:
@@ -331,275 +643,377 @@ def _get_all_component_updates(lang: str, components: dict) -> list:
             else:
                 updates.append(gr.update(label=I18n.get(dropdown_key, lang)))
         elif key.startswith('image_'):
-            # Image component
             image_key = key[6:]
             updates.append(gr.update(label=I18n.get(image_key, lang)))
         elif key.startswith('file_'):
-            # File component
             file_key = key[5:]
             updates.append(gr.update(label=I18n.get(file_key, lang)))
         elif key.startswith('textbox_'):
-            # Textbox component
             textbox_key = key[8:]
             updates.append(gr.update(label=I18n.get(textbox_key, lang)))
+        elif key.startswith('num_'):
+            num_key = key[4:]
+            updates.append(gr.update(label=I18n.get(num_key, lang)))
         elif key.startswith('html_'):
-            # HTML component
             html_key = key[5:]
             updates.append(gr.update(value=I18n.get(html_key, lang)))
+        elif key.startswith('accordion_'):
+            acc_key = key[10:]
+            updates.append(gr.update(label=I18n.get(acc_key, lang)))
         else:
-            # Other components, try to update directly
             updates.append(gr.update())
     
     return updates
 
 
 def _get_component_list(components: dict) -> list:
-    """
-    Get component list (for output)
-    
-    Args:
-        components: Component dictionary
-    
-    Returns:
-        list: Component object list
-    """
+    """Return component values in dict order (for Gradio outputs)."""
     return list(components.values())
 
 
+def get_extractor_reference_image(mode_str):
+    """Load or generate reference image for color extractor (disk-cached).
 
-# ==================== Tab Creation Functions ====================
+    Uses assets/ with filenames ref_6color_smart.png, ref_cmyw_standard.png,
+    or ref_rybw_standard.png. Generates via calibration board logic if missing.
+
+    Args:
+        mode_str: Color mode label (e.g. "6-Color", "CMYW", "RYBW").
+
+    Returns:
+        PIL.Image.Image | None: Reference image or None on error.
+    """
+    cache_dir = "assets"
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir, exist_ok=True)
+
+    if "6-Color" in mode_str or "1296" in mode_str:
+        filename = "ref_6color_smart.png"
+        gen_mode = "6-Color"
+    elif "CMYW" in mode_str:
+        filename = "ref_cmyw_standard.png"
+        gen_mode = "CMYW"
+    else:
+        filename = "ref_rybw_standard.png"
+        gen_mode = "RYBW"
+
+    filepath = os.path.join(cache_dir, filename)
+
+    if os.path.exists(filepath):
+        try:
+            print(f"[UI] Loading reference from cache: {filepath}")
+            return PILImage.open(filepath)
+        except Exception as e:
+            print(f"Error loading cache, regenerating: {e}")
+
+    print(f"[UI] Generating new reference for {gen_mode}...")
+    try:
+        block_size = 10
+        gap = 0
+        backing = "White"
+
+        if gen_mode == "6-Color":
+            from core.calibration import generate_smart_board
+            _, img, _ = generate_smart_board(block_size, gap)
+        else:
+            from core.calibration import generate_calibration_board
+            _, img, _ = generate_calibration_board(gen_mode, block_size, gap, backing)
+
+        if img:
+            if not isinstance(img, PILImage.Image):
+                import numpy as np
+                img = PILImage.fromarray(img.astype('uint8'), 'RGB')
+
+            img.save(filepath)
+            print(f"[UI] Cached reference saved to {filepath}")
+
+        return img
+
+    except Exception as e:
+        print(f"Error generating reference: {e}")
+        return None
+
+
+# ---------- Tab builders ----------
 
 def create_converter_tab_content(lang: str) -> dict:
-    """
-    Create image converter tab content
-    
+    """Build converter tab UI and events. Returns component dict for i18n.
+
     Args:
-    lang: Initial language
-    
+        lang: Initial language code ('zh' or 'en').
+
     Returns:
-    dict: Component dictionary {key: component}
+        dict: Mapping from component key to Gradio component (and state refs).
     """
     components = {}
-    
-    # Title and description
-    components['md_conv_title'] = gr.Markdown(I18n.get('conv_title', lang))
-    components['md_conv_desc'] = gr.Markdown(I18n.get('conv_desc', lang))
-    
-    # State variables
     conv_loop_pos = gr.State(None)
     conv_preview_cache = gr.State(None)
-    
+
     with gr.Row():
-        # ========== Left: Input and Parameters ==========
-        with gr.Column(scale=1):
+        with gr.Column(scale=1, min_width=320, elem_classes=["left-sidebar"]):
             components['md_conv_input_section'] = gr.Markdown(I18n.get('conv_input_section', lang))
-                
-            # LUT selector
-            with gr.Group():
-                components['md_conv_lut_title'] = gr.Markdown(I18n.get('conv_lut_title', lang))
-                    
+
+            saved_lut = load_last_lut_setting()
+            current_choices = LUTManager.get_lut_choices()
+            default_lut_value = saved_lut if saved_lut in current_choices else None
+
+            with gr.Row():
                 components['dropdown_conv_lut_dropdown'] = gr.Dropdown(
-                    choices=LUTManager.get_lut_choices(),
-                    label=I18n.get('conv_lut_dropdown', lang),
-                    value=None,
+                    choices=current_choices,
+                    label="校准数据 (.npy) / Calibration Data",
+                    value=default_lut_value,
                     interactive=True,
-                    info=I18n.get('conv_lut_info', lang)
+                    scale=2
                 )
-                    
                 conv_lut_upload = gr.File(
                     label="",
                     show_label=False,
                     file_types=['.npy'],
-                    height=60,
-                    elem_classes=["micro-upload"]
+                    height=84,
+                    min_width=100,
+                    scale=1,
+                    elem_classes=["tall-upload"]
                 )
-                    
-                components['md_conv_lut_status'] = gr.Markdown(
-                    value=I18n.get('conv_lut_status_default', lang),
-                    visible=True
-                )
-                
+            
+            components['md_conv_lut_status'] = gr.Markdown(
+                value=I18n.get('conv_lut_status_default', lang),
+                visible=True,
+                elem_classes=["lut-status"]
+            )
             conv_lut_path = gr.State(None)
-                
-            # Input image
+
+            with gr.Row():
+                components['checkbox_conv_batch_mode'] = gr.Checkbox(
+                    label=I18n.get('conv_batch_mode', lang),
+                    value=False,
+                    info=I18n.get('conv_batch_mode_info', lang)
+                )
             components['image_conv_image_label'] = gr.Image(
                 label=I18n.get('conv_image_label', lang),
                 type="filepath",
-                image_mode="RGBA"  # Force RGBA mode to preserve alpha channel
+                image_mode="RGBA",
+                height=240,
+                visible=True
             )
-                
-            # Parameter settings
+            components['file_conv_batch_input'] = gr.File(
+                label=I18n.get('conv_batch_input', lang),
+                file_count="multiple",
+                file_types=["image"],
+                visible=False
+            )
             components['md_conv_params_section'] = gr.Markdown(I18n.get('conv_params_section', lang))
-                
-            components['radio_conv_color_mode'] = gr.Radio(
-                choices=[
-                    I18n.get('conv_color_mode_cmyw', lang),
-                    I18n.get('conv_color_mode_rybw', lang),
-                    "6-Color (Smart 1296)"  # New 6-color option
-                ],
-                value=I18n.get('conv_color_mode_rybw', lang),
-                label=I18n.get('conv_color_mode', lang)
-            )
-                
-            components['radio_conv_structure'] = gr.Radio(
-                choices=[
-                    I18n.get('conv_structure_double', lang),
-                    I18n.get('conv_structure_single', lang)
-                ],
-                value=I18n.get('conv_structure_double', lang),
-                label=I18n.get('conv_structure', lang)
-            )
-                
-            components['radio_conv_modeling_mode'] = gr.Radio(
-                choices=[
-                    I18n.get('conv_modeling_mode_hifi', lang),
-                    I18n.get('conv_modeling_mode_pixel', lang),
-                    I18n.get('conv_modeling_mode_vector', lang)  # NEW: Vector Native mode
-                ],
-                value=I18n.get('conv_modeling_mode_hifi', lang),
-                label=I18n.get('conv_modeling_mode', lang),
-                info=I18n.get('conv_modeling_mode_info', lang)
-            )
-                
-            components['slider_conv_quantize_colors'] = gr.Slider(
-                minimum=8, maximum=256, step=8, value=64,
-                label=I18n.get('conv_quantize_colors', lang),
-                info=I18n.get('conv_quantize_info', lang)
-            )
-                
-            components['checkbox_conv_auto_bg'] = gr.Checkbox(
-                label=I18n.get('conv_auto_bg', lang),
-                value=True,
-                info=I18n.get('conv_auto_bg_info', lang)
-            )
-                
-            components['slider_conv_tolerance'] = gr.Slider(
-                0, 150, 40,
-                label=I18n.get('conv_tolerance', lang),
-                info=I18n.get('conv_tolerance_info', lang)
-            )
-                
-            components['slider_conv_width'] = gr.Slider(
-                20, 400, 60,
-                label=I18n.get('conv_width', lang)
-            )
-                
-            components['slider_conv_thickness'] = gr.Slider(
-                0.2, 3.5, 1.2, step=0.08,
-                label=I18n.get('conv_thickness', lang)
-            )
-                
-            components['btn_conv_preview_btn'] = gr.Button(
-                I18n.get('conv_preview_btn', lang),
-                variant="secondary",
-                size="lg"
-            )
-            
-        # ========== Middle: Preview Edit Area ==========
-        with gr.Column(scale=2):
-            components['md_conv_preview_section'] = gr.Markdown(
-                I18n.get('conv_preview_section', lang)
-            )
-                
-            conv_preview = gr.Image(
-                label="",
-                type="numpy",
-                height=500,
-                interactive=False,
-                show_label=False
-            )
-                
-            # Loop settings
-            with gr.Group():
-                components['md_conv_loop_section'] = gr.Markdown(
-                    I18n.get('conv_loop_section', lang)
+
+            with gr.Row(elem_classes=["compact-row"]):
+                components['slider_conv_width'] = gr.Slider(
+                    minimum=10, maximum=400, value=60, step=1,
+                    label=I18n.get('conv_width', lang),
+                    interactive=True
                 )
-                    
-                with gr.Row():
-                    components['checkbox_conv_loop_enable'] = gr.Checkbox(
-                        label=I18n.get('conv_loop_enable', lang),
-                        value=False
-                    )
-                    components['btn_conv_loop_remove'] = gr.Button(
-                        I18n.get('conv_loop_remove', lang),
-                        size="sm"
-                    )
-                    
-                with gr.Row():
-                    components['slider_conv_loop_width'] = gr.Slider(
-                        2, 10, 4, step=0.5,
-                        label=I18n.get('conv_loop_width', lang)
-                    )
-                    components['slider_conv_loop_length'] = gr.Slider(
-                        4, 15, 8, step=0.5,
-                        label=I18n.get('conv_loop_length', lang)
-                    )
-                    components['slider_conv_loop_hole'] = gr.Slider(
-                        1, 5, 2.5, step=0.25,
-                        label=I18n.get('conv_loop_hole', lang)
-                    )
-                    
-                with gr.Row():
-                    components['slider_conv_loop_angle'] = gr.Slider(
-                        -180, 180, 0, step=5,
-                        label=I18n.get('conv_loop_angle', lang)
-                    )
-                    components['textbox_conv_loop_info'] = gr.Textbox(
-                        label=I18n.get('conv_loop_info', lang),
-                        interactive=False,
-                        scale=2
-                    )
+                components['slider_conv_height'] = gr.Slider(
+                    minimum=10, maximum=400, value=60, step=1,
+                    label=I18n.get('conv_height', lang),
+                    interactive=True
+                )
+                components['slider_conv_thickness'] = gr.Slider(
+                    0.2, 3.5, 1.2, step=0.08,
+                    label=I18n.get('conv_thickness', lang)
+                )
+            conv_target_height_mm = components['slider_conv_height']
+
+            with gr.Row(elem_classes=["compact-row"]):
+                components['radio_conv_color_mode'] = gr.Radio(
+                    choices=[
+                        I18n.get('conv_color_mode_cmyw', lang),
+                        I18n.get('conv_color_mode_rybw', lang),
+                        "6-Color (Smart 1296)"
+                    ],
+                    value=I18n.get('conv_color_mode_rybw', lang),
+                    label=I18n.get('conv_color_mode', lang)
+                )
                 
-            components['textbox_conv_status'] = gr.Textbox(
-                label=I18n.get('conv_status', lang),
-                lines=6,
-                interactive=False,
-                max_lines=10,
-                show_label=True
-            )
+                components['radio_conv_structure'] = gr.Radio(
+                    choices=[
+                        I18n.get('conv_structure_double', lang),
+                        I18n.get('conv_structure_single', lang)
+                    ],
+                    value=I18n.get('conv_structure_double', lang),
+                    label=I18n.get('conv_structure', lang)
+                )
+
+            with gr.Row(elem_classes=["compact-row"]):
+                components['radio_conv_modeling_mode'] = gr.Radio(
+                    choices=[
+                        I18n.get('conv_modeling_mode_hifi', lang),
+                        I18n.get('conv_modeling_mode_pixel', lang),
+                        I18n.get('conv_modeling_mode_vector', lang)
+                    ],
+                    value=I18n.get('conv_modeling_mode_hifi', lang),
+                    label=I18n.get('conv_modeling_mode', lang),
+                    info=I18n.get('conv_modeling_mode_info', lang),
+                    elem_classes=["vertical-radio"],
+                    scale=2
+                )
+                
+                components['checkbox_conv_auto_bg'] = gr.Checkbox(
+                    label=I18n.get('conv_auto_bg', lang),
+                    value=True,
+                    info=I18n.get('conv_auto_bg_info', lang),
+                    scale=1
+                )
+            with gr.Accordion(label=I18n.get('conv_advanced', lang), open=False) as conv_advanced_acc:
+                components['accordion_conv_advanced'] = conv_advanced_acc
+                with gr.Row():
+                    components['slider_conv_quantize_colors'] = gr.Slider(
+                        minimum=8, maximum=256, step=8, value=64,
+                        label=I18n.get('conv_quantize_colors', lang),
+                        info=I18n.get('conv_quantize_info', lang)
+                    )
+                    components['slider_conv_tolerance'] = gr.Slider(
+                        0, 150, 40,
+                        label=I18n.get('conv_tolerance', lang),
+                        info=I18n.get('conv_tolerance_info', lang)
+                    )
+            gr.Markdown("---")
+            with gr.Row(elem_classes=["action-buttons"]):
+                components['btn_conv_preview_btn'] = gr.Button(
+                    I18n.get('conv_preview_btn', lang),
+                    variant="secondary",
+                    size="lg"
+                )
+                components['btn_conv_generate_btn'] = gr.Button(
+                    I18n.get('conv_generate_btn', lang),
+                    variant="primary",
+                    size="lg"
+                )
             
-        # ========== Right: Output ==========
-        with gr.Column(scale=1):
-            components['btn_conv_generate_btn'] = gr.Button(
-                I18n.get('conv_generate_btn', lang),
-                variant="primary",
-                size="lg"
-            )
-                
-            components['md_conv_3d_preview'] = gr.Markdown(
-                I18n.get('conv_3d_preview', lang)
-            )
-                
-            conv_3d_preview = gr.Model3D(
-                label="3D",
-                clear_color=[0.9, 0.9, 0.9, 1.0],
-                height=280
-            )
-                
-            components['md_conv_download_section'] = gr.Markdown(
-                I18n.get('conv_download_section', lang)
-            )
-                
-            components['file_conv_download_file'] = gr.File(
-                label=I18n.get('conv_download_file', lang)
-            )
+        with gr.Column(scale=3, elem_classes=["workspace-area"]):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    components['md_conv_preview_section'] = gr.Markdown(
+                        I18n.get('conv_preview_section', lang)
+                    )
+                        
+                    conv_preview = gr.Image(
+                        label="",
+                        type="numpy",
+                        height=600,
+                        interactive=False,
+                        show_label=False
+                    )
+                    with gr.Group():
+                        components['md_conv_loop_section'] = gr.Markdown(
+                            I18n.get('conv_loop_section', lang)
+                        )
+                            
+                        with gr.Row():
+                            components['checkbox_conv_loop_enable'] = gr.Checkbox(
+                                label=I18n.get('conv_loop_enable', lang),
+                                value=False
+                            )
+                            components['btn_conv_loop_remove'] = gr.Button(
+                                I18n.get('conv_loop_remove', lang),
+                                size="sm"
+                            )
+                            
+                        with gr.Row():
+                            components['slider_conv_loop_width'] = gr.Slider(
+                                2, 10, 4, step=0.5,
+                                label=I18n.get('conv_loop_width', lang)
+                            )
+                            components['slider_conv_loop_length'] = gr.Slider(
+                                4, 15, 8, step=0.5,
+                                label=I18n.get('conv_loop_length', lang)
+                            )
+                            components['slider_conv_loop_hole'] = gr.Slider(
+                                1, 5, 2.5, step=0.25,
+                                label=I18n.get('conv_loop_hole', lang)
+                            )
+                            
+                        with gr.Row():
+                            components['slider_conv_loop_angle'] = gr.Slider(
+                                -180, 180, 0, step=5,
+                                label=I18n.get('conv_loop_angle', lang)
+                            )
+                            components['textbox_conv_loop_info'] = gr.Textbox(
+                                label=I18n.get('conv_loop_info', lang),
+                                interactive=False,
+                                scale=2
+                            )
+                    components['textbox_conv_status'] = gr.Textbox(
+                        label=I18n.get('conv_status', lang),
+                        lines=3,
+                        interactive=False,
+                        max_lines=10,
+                        show_label=True
+                    )
+                with gr.Column(scale=1):
+                    components['md_conv_3d_preview'] = gr.Markdown(
+                        I18n.get('conv_3d_preview', lang)
+                    )
+                        
+                    conv_3d_preview = gr.Model3D(
+                        label="3D",
+                        clear_color=[0.9, 0.9, 0.9, 1.0],
+                        height=600
+                    )
+                        
+                    components['md_conv_download_section'] = gr.Markdown(
+                        I18n.get('conv_download_section', lang)
+                    )
+                        
+                    components['file_conv_download_file'] = gr.File(
+                        label=I18n.get('conv_download_file', lang)
+                    )
+                    components['btn_conv_stop'] = gr.Button(
+                        value=I18n.get('conv_stop', lang),
+                        variant="stop",
+                        size="lg"
+                    )
     
-    # ========== Event Binding ==========
-    # LUT selection event
+    # Event binding
+    def toggle_batch_mode(is_batch):
+        return [
+            gr.update(visible=not is_batch),
+            gr.update(visible=is_batch)
+        ]
+
+    components['checkbox_conv_batch_mode'].change(
+        fn=toggle_batch_mode,
+        inputs=[components['checkbox_conv_batch_mode']],
+        outputs=[components['image_conv_image_label'], components['file_conv_batch_input']]
+    )
+
     components['dropdown_conv_lut_dropdown'].change(
             on_lut_select,
             inputs=[components['dropdown_conv_lut_dropdown']],
             outputs=[conv_lut_path, components['md_conv_lut_status']]
+    ).then(
+            fn=save_last_lut_setting,
+            inputs=[components['dropdown_conv_lut_dropdown']],
+            outputs=None
     )
-    
-    # LUT upload event
+
     conv_lut_upload.upload(
             on_lut_upload_save,
             inputs=[conv_lut_upload],
             outputs=[components['dropdown_conv_lut_dropdown'], components['md_conv_lut_status']]
     )
     
-    # Generate preview
+    components['image_conv_image_label'].change(
+            fn=init_dims,
+            inputs=[components['image_conv_image_label']],
+            outputs=[components['slider_conv_width'], conv_target_height_mm]
+    )
+    components['slider_conv_width'].input(
+            fn=calc_height_from_width,
+            inputs=[components['slider_conv_width'], components['image_conv_image_label']],
+            outputs=[conv_target_height_mm]
+    )
+    conv_target_height_mm.input(
+            fn=calc_width_from_height,
+            inputs=[conv_target_height_mm, components['image_conv_image_label']],
+            outputs=[components['slider_conv_width']]
+    )
     components['btn_conv_preview_btn'].click(
             generate_preview_cached,
             inputs=[
@@ -613,8 +1027,6 @@ def create_converter_tab_content(lang: str) -> dict:
             ],
             outputs=[conv_preview, conv_preview_cache, components['textbox_conv_status']]
     )
-    
-    # Click preview image to place loop
     conv_preview.select(
             on_preview_click,
             inputs=[conv_preview_cache, conv_loop_pos],
@@ -628,8 +1040,6 @@ def create_converter_tab_content(lang: str) -> dict:
             ],
             outputs=[conv_preview]
     )
-    
-    # Remove loop
     components['btn_conv_loop_remove'].click(
             on_remove_loop,
             outputs=[conv_loop_pos, components['checkbox_conv_loop_enable'], 
@@ -643,8 +1053,6 @@ def create_converter_tab_content(lang: str) -> dict:
             ],
             outputs=[conv_preview]
     )
-    
-    # Update preview in real-time when loop parameters change
     loop_params = [
             components['slider_conv_loop_width'],
             components['slider_conv_loop_length'],
@@ -661,11 +1069,11 @@ def create_converter_tab_content(lang: str) -> dict:
                 ],
                 outputs=[conv_preview]
             )
-    
-    # Generate final model
-    components['btn_conv_generate_btn'].click(
-            generate_final_model_with_mapping,  # Use wrapper with mode mapping
+    generate_event = components['btn_conv_generate_btn'].click(
+            fn=process_batch_generation,
             inputs=[
+                components['file_conv_batch_input'],
+                components['checkbox_conv_batch_mode'],
                 components['image_conv_image_label'],
                 conv_lut_path,
                 components['slider_conv_width'],
@@ -689,17 +1097,20 @@ def create_converter_tab_content(lang: str) -> dict:
                 components['textbox_conv_status']
             ]
     )
-    
+    components['btn_conv_stop'].click(
+        fn=None,
+        inputs=None,
+        outputs=None,
+        cancels=[generate_event]
+    )
+    components['state_conv_lut_path'] = conv_lut_path
     return components
 
 
 
 def create_calibration_tab_content(lang: str) -> dict:
-    """Create calibration board generation tab content"""
+    """Build calibration board tab UI and events. Returns component dict."""
     components = {}
-    
-    components['md_cal_title'] = gr.Markdown(I18n.get('cal_title', lang))
-    components['md_cal_desc'] = gr.Markdown(I18n.get('cal_desc', lang))
     
     with gr.Row():
         with gr.Column(scale=1):
@@ -783,17 +1194,14 @@ def create_calibration_tab_content(lang: str) -> dict:
 
 
 def create_extractor_tab_content(lang: str) -> dict:
-    """Create color extractor tab content"""
+    """Build color extractor tab UI and events. Returns component dict."""
     components = {}
-    
-    components['md_ext_title'] = gr.Markdown(I18n.get('ext_title', lang))
-    components['md_ext_desc'] = gr.Markdown(I18n.get('ext_desc', lang))
-    
     ext_state_img = gr.State(None)
     ext_state_pts = gr.State([])
     ext_curr_coord = gr.State(None)
-    ref_img = generate_simulated_reference()
-    
+    default_mode = I18n.get('conv_color_mode_rybw', lang)
+    ref_img = get_extractor_reference_image(default_mode)
+
     with gr.Row():
         with gr.Column(scale=1):
             components['md_ext_upload_section'] = gr.Markdown(
@@ -924,7 +1332,6 @@ def create_extractor_tab_content(lang: str) -> dict:
                         label=I18n.get('ext_download_npy', lang)
                     )
     
-    # Event binding (simplified version, maintains original logic)
     ext_img_in.upload(
             on_extractor_upload,
             [ext_img_in, components['radio_ext_color_mode']],
@@ -936,7 +1343,13 @@ def create_extractor_tab_content(lang: str) -> dict:
             [ext_state_img, components['radio_ext_color_mode']],
             [ext_state_pts, ext_hint, ext_work_img]
     )
-    
+
+    components['radio_ext_color_mode'].change(
+        fn=get_extractor_reference_image,
+        inputs=[components['radio_ext_color_mode']],
+        outputs=[ext_ref_view]
+    )
+
     components['btn_ext_rotate_btn'].click(
             on_extractor_rotate,
             [ext_state_img, components['radio_ext_color_mode']],
@@ -960,7 +1373,7 @@ def create_extractor_tab_content(lang: str) -> dict:
             components['slider_ext_offset_x'], components['slider_ext_offset_y'],
             components['slider_ext_zoom'], components['slider_ext_distortion'],
             components['checkbox_ext_wb'], components['checkbox_ext_vignette'],
-            components['radio_ext_color_mode']  # Add color_mode parameter
+            components['radio_ext_color_mode']
     ]
     extract_outputs = [
             ext_warp_view, ext_lut_view,
@@ -985,7 +1398,7 @@ def create_extractor_tab_content(lang: str) -> dict:
 
 
 def create_about_tab_content(lang: str) -> dict:
-    """Create about tab content"""
+    """Build About tab content from i18n. Returns component dict."""
     components = {}
     
     # About page content (from i18n)

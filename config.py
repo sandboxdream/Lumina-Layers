@@ -1,23 +1,14 @@
-"""
-Lumina Studio - Configuration Module
-
-Contains all configuration classes, constants, and internationalization texts.
-"""
+"""Lumina Studio configuration: paths, printer/smart config, and legacy i18n data."""
 
 import os
 from enum import Enum
-
-
-# ========== Output Directory ==========
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-# ========== Shared Configuration ==========
-
 class PrinterConfig:
-    """Physical printer parameters."""
+    """Physical printer parameters (layer height, nozzle, backing)."""
     LAYER_HEIGHT: float = 0.08
     NOZZLE_WIDTH: float = 0.42
     COLOR_LAYERS: int = 5
@@ -32,11 +23,9 @@ class SmartConfig:
     
     DEFAULT_BLOCK_SIZE: float = 5.0  # mm (Face Down mode)
     DEFAULT_GAP: float = 0.8  # mm
-    
-    # Bambu Lab filament physical properties (RGB Hex + Transmission Distance)
-    # Source: Official color card + measured data
+
     FILAMENTS = {
-        0: {"name": "White",   "hex": "#FFFFFF", "rgb": [255, 255, 255], "td": 5.0},  # Jade White
+        0: {"name": "White",   "hex": "#FFFFFF", "rgb": [255, 255, 255], "td": 5.0},
         1: {"name": "Cyan",    "hex": "#0086D6", "rgb": [0, 134, 214],   "td": 3.5},
         2: {"name": "Magenta", "hex": "#EC008C", "rgb": [236, 0, 140],   "td": 3.0},
         3: {"name": "Green",   "hex": "#00AE42", "rgb": [0, 174, 66],    "td": 2.0},
@@ -44,10 +33,8 @@ class SmartConfig:
         5: {"name": "Black",   "hex": "#000000", "rgb": [0, 0, 0],       "td": 0.6},
     }
 
-# ========== Internationalization ==========
-
 class I18N:
-    """Internationalization support for Chinese and English."""
+    """Legacy i18n texts (Chinese/English). Prefer core.i18n.I18n for UI."""
 
     TEXTS = {
         # Header
@@ -127,8 +114,8 @@ class I18N:
         'conv_modeling_mode': {'zh': '建模模式', 'en': 'Modeling Mode'},
         'conv_modeling_mode_hifi': {'zh': '🎨 高保真（平滑）', 'en': '🎨 High-Fidelity (Smooth)'},
         'conv_modeling_mode_pixel': {'zh': '🧱 像素艺术（方块）', 'en': '🧱 Pixel Art (Blocky)'},
-        'conv_modeling_mode_vector': {'zh': '📐 矢量原生（仅SVG）', 'en': '📐 Vector Native (SVG Only)'},
-        'conv_modeling_mode_info': {'zh': '高保真：平滑曲线 | 像素艺术：方块风格 | 矢量原生：SVG直接转换', 'en': 'High-Fidelity: Smooth curves | Pixel Art: Blocky style | Vector Native: Direct SVG conversion'},
+        'conv_modeling_mode_vector': {'zh': '📐 SVG模式', 'en': '📐 SVG Mode'},
+        'conv_modeling_mode_info': {'zh': '高保真：平滑曲线 | 像素艺术：方块风格 | SVG模式：矢量直接转换', 'en': 'High-Fidelity: Smooth curves | Pixel Art: Blocky style | SVG Mode: Direct vector conversion'},
         'conv_quantize_colors': {'zh': '色彩细节', 'en': 'Color Detail'},
         'conv_quantize_info': {'zh': '8-32色：极简 | 64-128色：平衡 | 128-256色：照片级', 'en': '8-32: Minimalist | 64-128: Balanced | 128-256: Photographic'},
         'conv_structure': {'zh': '结构类型', 'en': 'Structure Type'},
@@ -137,6 +124,7 @@ class I18N:
         'conv_auto_bg': {'zh': '自动移除背景', 'en': 'Auto Background Removal'},
         'conv_tolerance': {'zh': '背景容差', 'en': 'Background Tolerance'},
         'conv_width': {'zh': '目标宽度 (mm)', 'en': 'Target Width (mm)'},
+        'conv_height': {'zh': '目标高度 (mm)', 'en': 'Target Height (mm)'},
         'conv_thickness': {'zh': '背板厚度 (mm)', 'en': 'Backing Thickness (mm)'},
         'conv_generate': {'zh': '🚀 生成模型', 'en': '🚀 Generate Model'},
         'conv_3d_preview': {'zh': '#### 🎮 3D 预览（可拖拽旋转/滚轮缩放）', 'en': '#### 🎮 3D Preview (Drag to rotate / Scroll to zoom)'},

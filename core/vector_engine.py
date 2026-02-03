@@ -22,6 +22,7 @@ import numpy as np
 import trimesh
 from svgelements import SVG, Path, Shape
 from shapely.geometry import Polygon, MultiPolygon
+from shapely import affinity  # <--- 【新增】用于几何变换
 from shapely.ops import unary_union
 import os
 
@@ -273,53 +274,30 @@ class VectorProcessor:
     
     def _parse_svg(self, svg_path: str, target_width_mm: float):
         """
-        Parse SVG file and extract shapes with colors.
+        Parse SVG and normalize coordinates using Shapely Affinity.
         
-        Args:
-            svg_path: Path to SVG file
-            target_width_mm: Target width in millimeters
-            
-        Returns:
-            tuple: (shape_data, scale_factor, bbox)
-                - shape_data: List of {'poly': Polygon, 'color': (r,g,b)}
-                - scale_factor: SVG units to mm conversion
-                - bbox: (x, y, width, height) in SVG units
-                
-        Raises:
-            ValueError: If SVG parsing fails or has invalid dimensions
+        [Method]: Global Geometry Normalization
         """
         try:
             svg = SVG.parse(svg_path)
         except Exception as e:
             raise ValueError(f"Failed to parse SVG: {e}")
         
-        # Get bounding box for scaling
-        bbox_x, bbox_y, bbox_w, bbox_h = svg.bbox()
+        raw_shapes = []
         
-        if bbox_w == 0:
-            raise ValueError("Invalid SVG dimensions (width is 0)")
+        print(f"[VECTOR] Parsing SVG geometry...")
         
-        # Calculate scale factor
-        scale_factor = target_width_mm / bbox_w
-        
-        # Calculate sampling step for curve approximation
-        sampling_step = self.sampling_precision / scale_factor
-        
-        shapes = []
-        
+        # --- 阶段 1: 提取所有原始几何体 (不关心坐标) ---
         for element in svg.elements():
-            # Only process Path and Shape elements
             if not isinstance(element, (Path, Shape)):
                 continue
             
-            # Skip elements without fill
             if element.fill is None or element.fill.value is None:
                 continue
             
-            # Extract RGB color
             rgb = (element.fill.red, element.fill.green, element.fill.blue)
             
-            # Convert Shape to Path if needed
+            # 统一转为 Path
             if isinstance(element, Shape) and not isinstance(element, Path):
                 try:
                     element = Path(element)
@@ -327,37 +305,79 @@ class VectorProcessor:
                     continue
             
             try:
-                # Get path length for adaptive sampling
+                # 采样点生成多边形
+                # 这里我们先用一个相对安全的采样步长，后续不需重采，直接变换几何体
                 path_len = element.length()
                 if path_len == 0:
                     continue
                 
-                # Calculate number of sample points
-                num_points = max(6, int(path_len / sampling_step))
+                # 初始采样 (保证基本形状)
+                step = 1.0  # 初始像素步长
+                num_points = max(10, min(int(path_len / step), 2000))
                 
-                # Sample points along path
                 t_vals = np.linspace(0, 1, num_points)
                 pts = [element.point(t) for t in t_vals]
-                pts = [(p.x, p.y) for p in pts]  # Extract (x, y) tuples
                 
                 if len(pts) < 3:
                     continue
                 
-                # Create Shapely polygon
-                poly = Polygon(pts)
+                poly = Polygon([(p.x, p.y) for p in pts])
                 
-                # Fix invalid geometry
                 if not poly.is_valid:
                     poly = poly.buffer(0)
                 
                 if poly.is_valid and not poly.is_empty:
-                    shapes.append({'poly': poly, 'color': rgb})
+                    raw_shapes.append({'poly': poly, 'color': rgb})
                     
             except Exception as e:
-                print(f"[VECTOR] Warning: Failed to process element: {e}")
                 continue
         
-        return shapes, scale_factor, (bbox_x, bbox_y, bbox_w, bbox_h)
+        if not raw_shapes:
+            raise ValueError("No valid shapes found in SVG")
+        
+        # --- 阶段 2: 计算全局物理边界 (Global BBox) ---
+        # 将所有形状视为一个整体，计算它的真实边界
+        all_polys = [item['poly'] for item in raw_shapes]
+        
+        # 使用 unary_union 可能较慢，我们直接用 bounds 列表计算
+        # 这样速度极快且不容易出错
+        min_xs, min_ys, max_xs, max_ys = [], [], [], []
+        for p in all_polys:
+            minx, miny, maxx, maxy = p.bounds
+            min_xs.append(minx)
+            min_ys.append(miny)
+            max_xs.append(maxx)
+            max_ys.append(maxy)
+        
+        global_min_x = min(min_xs)
+        global_min_y = min(min_ys)
+        global_max_x = max(max_xs)
+        global_max_y = max(max_ys)
+        
+        real_w = global_max_x - global_min_x
+        real_h = global_max_y - global_min_y
+        
+        print(f"[VECTOR] Global Geometry Bounds: x={global_min_x:.1f}, y={global_min_y:.1f}, w={real_w:.1f}, h={real_h:.1f}")
+        
+        if real_w == 0:
+            raise ValueError("Invalid geometry width (0)")
+        
+        # --- 阶段 3: 计算缩放与归位 ---
+        scale_factor = target_width_mm / real_w
+        
+        final_shapes = []
+        
+        # --- 阶段 4: 整体平移 (Shapely Affinity) ---
+        # 直接操作几何对象，不操作点，这更稳健
+        for item in raw_shapes:
+            original_poly = item['poly']
+            
+            # 平移：所有形状减去 global_min_x/y，使其左上角归零
+            shifted_poly = affinity.translate(original_poly, xoff=-global_min_x, yoff=-global_min_y)
+            
+            final_shapes.append({'poly': shifted_poly, 'color': item['color']})
+        
+        return final_shapes, scale_factor, (global_min_x, global_min_y, real_w, real_h)
     
     def _group_by_layers(self, shape_data):
         """

@@ -45,54 +45,110 @@ class LuminaImageProcessor:
     
     def _load_svg(self, svg_path, target_width_mm):
         """
-        [New] Render SVG to ultra-high-resolution numpy array
-        [Updated] Increased resolution from 10 px/mm to 20 px/mm for smoother curves
+        [Final Fix] Safe Padding + Dual-Pass Transparency Detection.
         
-        Target resolution: 20 pixels/mm (Ultra-High-Fidelity)
-        - Standard High-Fidelity: 10 px/mm (0.1mm precision)
-        - Ultra High-Fidelity: 20 px/mm (0.05mm precision)
+        Method: Render twice (White BG / Black BG).
+        - If pixel changes color -> It's background (Transparent) -> Remove it.
+        - If pixel stays same -> It's content (Opaque) -> Keep it 100% intact.
         
-        This super-sampling approach eliminates jagged edges on curves
-        without needing blur filters, preserving vector crispness.
-        
-        Args:
-            svg_path: Path to SVG file
-            target_width_mm: Target width in millimeters
-        
-        Returns:
-            numpy.ndarray: RGBA image array
+        This guarantees NO internal image damage.
         """
         if not HAS_SVG:
-            raise ImportError("Please install 'svglib' and 'reportlab' to process SVG files.")
+            raise ImportError("Please install 'svglib' and 'reportlab'.")
         
-        print(f"[SVG] Rasterizing vector file: {svg_path}")
+        print(f"[SVG] Rasterizing: {svg_path}")
         
-        # 1. Read SVG
+        # 1. 读取 SVG
         drawing = svg2rlg(svg_path)
         
-        # 2. Calculate scale for Ultra-High-Fidelity (20 px/mm)
-        # [UPGRADED] Doubled resolution for smoother curves
-        # Old: 10.0 px/mm (0.1mm) - visible jaggies on curves
-        # New: 20.0 px/mm (0.05mm) - ultra-smooth, exceeds most FDM printer limits
+        # --- 步骤 A: 撑大画布 (确保内容不被切断) ---
+        x1, y1, x2, y2 = drawing.getBounds()
+        raw_w = x2 - x1
+        raw_h = y2 - y1
+        
+        # 添加 20% 安全边距
+        padding_x = raw_w * 0.2
+        padding_y = raw_h * 0.2
+        
+        drawing.translate(-x1 + padding_x, -y1 + padding_y)
+        drawing.width = raw_w + (padding_x * 2)
+        drawing.height = raw_h + (padding_y * 2)
+        
+        # 2. 缩放
         pixels_per_mm = 20.0
         target_width_px = int(target_width_mm * pixels_per_mm)
-        scale_factor = target_width_px / drawing.width
         
-        print(f"[SVG] Ultra-High-Fidelity mode: {pixels_per_mm} px/mm (0.05mm precision)")
+        if raw_w > 0:
+            scale_factor = target_width_px / raw_w
+        else:
+            scale_factor = 1.0
         
-        # 3. Scale drawing
         drawing.scale(scale_factor, scale_factor)
         drawing.width = int(drawing.width * scale_factor)
         drawing.height = int(drawing.height * scale_factor)
         
-        # 4. Render to PIL Image
-        # use bg=0xffffff to handle transparency correctly if needed, or maintain alpha
-        pil_img = renderPM.drawToPIL(drawing, bg=None, configPIL={'transparent': True})
-        
-        print(f"[SVG] Rendered resolution: {drawing.width}x{drawing.height} px")
-        
-        # 5. Convert to RGBA numpy array
-        return np.array(pil_img.convert('RGBA'))
+        # ================== 【终极方案】双重渲染差分法 ==================
+        try:
+            # Pass 1: 白底渲染 (0xFFFFFF)
+            # 强制不使用透明通道，完全模拟打印在白纸上的效果
+            pil_white = renderPM.drawToPIL(drawing, bg=0xFFFFFF, configPIL={'transparent': False})
+            arr_white = np.array(pil_white.convert('RGB'))  # 丢弃 Alpha，只看颜色
+            
+            # Pass 2: 黑底渲染 (0x000000)
+            # 强制不使用透明通道，完全模拟打印在黑纸上的效果
+            pil_black = renderPM.drawToPIL(drawing, bg=0x000000, configPIL={'transparent': False})
+            arr_black = np.array(pil_black.convert('RGB'))
+            
+            # 计算差异 (Difference)
+            # diff = |白底图 - 黑底图|
+            # 如果像素是实心的，它挡住了背景，所以在白底和黑底上颜色一样 -> diff 为 0
+            # 如果像素是透明的，它透出了背景，所以在白底是白，黑底是黑 -> diff 很大
+            diff = np.abs(arr_white.astype(int) - arr_black.astype(int))
+            diff_sum = np.sum(diff, axis=2)
+            
+            # 生成完美的 Alpha 掩膜
+            # 只要差异小于 10，我们就认为它是实心内容 (容错处理抗锯齿边缘)
+            # 这样绝对不会误伤图像内部的任何颜色
+            alpha_mask = np.where(diff_sum < 10, 255, 0).astype(np.uint8)
+            
+            # 合成最终图像
+            # 我们取白底图的颜色 (因为它是实心的，取黑底图也一样)，然后把算出来的 alpha 贴上去
+            r, g, b = cv2.split(arr_white)
+            img_final = cv2.merge([r, g, b, alpha_mask])
+            
+            # 执行安全裁切
+            coords = cv2.findNonZero(alpha_mask)
+            
+            if coords is not None:
+                x, y, w_rect, h_rect = cv2.boundingRect(coords)
+                
+                if w_rect > 0 and h_rect > 0:
+                    print(f"[SVG] Dual-Pass Crop: {w_rect}x{h_rect} (Safe & Clean)")
+                    
+                    # 留 2 像素边缘
+                    pad = 2
+                    y_start = max(0, y - pad)
+                    y_end = min(img_final.shape[0], y + h_rect + pad)
+                    x_start = max(0, x - pad)
+                    x_end = min(img_final.shape[1], x + w_rect + pad)
+                    
+                    img_final = img_final[y_start:y_end, x_start:x_end]
+                else:
+                    print("[SVG] Warning: Content too small.")
+            else:
+                print("[SVG] Warning: Image appears fully transparent.")
+            
+            print(f"[SVG] Final resolution: {img_final.shape[1]}x{img_final.shape[0]} px")
+            return img_final
+            
+        except Exception as e:
+            print(f"[SVG] Dual-Pass failed: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # 最后的保底：如果双重渲染失败，回退到普通渲染
+            pil_img = renderPM.drawToPIL(drawing, bg=None, configPIL={'transparent': True})
+            return np.array(pil_img.convert('RGBA'))
     
     def _load_lut(self, lut_path):
         """

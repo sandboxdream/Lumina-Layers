@@ -122,6 +122,38 @@ CUSTOM_CSS = """
     font-size: 0.9em;
 }
 
+/* Vertical Radio Button Layout */
+.vertical-radio fieldset {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+}
+
+.vertical-radio .wrap {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+}
+
+.vertical-radio label {
+    display: flex !important;
+    align-items: center !important;
+    padding: 8px 12px !important;
+    border-radius: 6px !important;
+    background: #f8f8f8 !important;
+    transition: all 0.2s ease !important;
+}
+
+.vertical-radio label:hover {
+    background: #f0f0ff !important;
+    border-color: #667eea !important;
+}
+
+.vertical-radio input[type="radio"]:checked + label {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+    color: white !important;
+}
+
 /* Micro Upload Dropzone - Ultra Compact */
 .micro-upload {
     min-height: 60px !important;
