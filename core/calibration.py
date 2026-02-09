@@ -533,7 +533,7 @@ def generate_bw_calibration_board(block_size_mm=5.0, gap_mm=0.8, backing_color="
     - 8x8 physical grid (6x6 data + 2 border protection)
     - 32 exhaustive color combinations (2^5 = 32)
     - Corner alignment markers in outermost ring
-    - Face Down printing optimization
+    - Face Up printing (same as 4-color mode)
     
     Args:
         block_size_mm: Size of each color block in mm

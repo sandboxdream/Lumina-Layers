@@ -29,14 +29,10 @@ class LUTManager:
             print(f"[LUT_MANAGER] Warning: LUT preset directory not found: {cls.LUT_PRESET_DIR}")
             return lut_files
         
-        # Recursively search for all .npy and .npz files
+        # Recursively search for all .npy files
         npy_pattern = os.path.join(cls.LUT_PRESET_DIR, "**", "*.npy")
-        npz_pattern = os.path.join(cls.LUT_PRESET_DIR, "**", "*.npz")
         
-        npy_files = glob.glob(npy_pattern, recursive=True)
-        npz_files = glob.glob(npz_pattern, recursive=True)
-        
-        all_files = npy_files + npz_files
+        all_files = glob.glob(npy_pattern, recursive=True)
         
         for file_path in all_files:
             # Generate friendly display name
@@ -47,20 +43,12 @@ class LUTManager:
             if len(parts) > 1:
                 # Has subfolder, format: Brand - Filename
                 brand = parts[0]
-                filename = Path(parts[-1]).stem  # Remove .npy/.npz extension
-                
-                # Add indicator for merged LUTs
-                if file_path.endswith('.npz'):
-                    display_name = f"{brand} - {filename} [Merged]"
-                else:
-                    display_name = f"{brand} - {filename}"
+                filename = Path(parts[-1]).stem  # Remove .npy extension
+                display_name = f"{brand} - {filename}"
             else:
                 # Root directory file, use filename directly
                 filename = Path(rel_path).stem
-                if file_path.endswith('.npz'):
-                    display_name = f"{filename} [Merged]"
-                else:
-                    display_name = filename
+                display_name = filename
             
             lut_files[display_name] = file_path
         
@@ -118,11 +106,11 @@ class LUTManager:
             # Get original filename and extension
             original_path = Path(uploaded_file.name)
             original_name = original_path.stem
-            file_extension = original_path.suffix  # .npy or .npz
+            file_extension = original_path.suffix  # .npy
             
             # Validate file extension
-            if file_extension not in ['.npy', '.npz']:
-                return False, f"❌ Invalid file type: {file_extension}. Only .npy and .npz are supported.", cls.get_lut_choices()
+            if file_extension != '.npy':
+                return False, f"❌ Invalid file type: {file_extension}. Only .npy is supported.", cls.get_lut_choices()
             
             # Use custom name or original name
             if custom_name and custom_name.strip():
@@ -151,8 +139,6 @@ class LUTManager:
             
             # Build display name
             display_name = f"Custom - {Path(dest_path).stem}"
-            if file_extension == '.npz':
-                display_name += " [Merged]"
             
             print(f"[LUT_MANAGER] Saved uploaded LUT: {dest_path}")
             
