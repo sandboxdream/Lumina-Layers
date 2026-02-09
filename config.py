@@ -127,13 +127,19 @@ class ColorSystem:
     def get(mode: str):
         if mode is None:
             return ColorSystem.RYBW  # Default fallback
-        if "BW" in mode or ("Black" in mode and "White" in mode):
-            return ColorSystem.BW
+        # Check specific patterns first (most specific to least specific)
         if "8-Color" in mode:
             return ColorSystem.EIGHT_COLOR
         if "6-Color" in mode:
             return ColorSystem.SIX_COLOR
-        return ColorSystem.CMYW if "CMYW" in mode else ColorSystem.RYBW
+        if "RYBW" in mode:
+            return ColorSystem.RYBW
+        if "CMYW" in mode:
+            return ColorSystem.CMYW
+        # Check BW last to avoid matching RYBW
+        if mode == "BW" or ("Black" in mode and "White" in mode and "RY" not in mode):
+            return ColorSystem.BW
+        return ColorSystem.RYBW  # Default fallback
 
 # ========== Global Constants ==========
 

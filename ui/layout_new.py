@@ -1049,11 +1049,12 @@ def _get_component_list(components: dict) -> list:
 def get_extractor_reference_image(mode_str):
     """Load or generate reference image for color extractor (disk-cached).
 
-    Uses assets/ with filenames ref_6color_smart.png, ref_cmyw_standard.png,
-    or ref_rybw_standard.png. Generates via calibration board logic if missing.
+    Uses assets/ with filenames ref_bw_standard.png, ref_cmyw_standard.png,
+    ref_rybw_standard.png, ref_6color_smart.png, or ref_8color_smart.png.
+    Generates via calibration board logic if missing.
 
     Args:
-        mode_str: Color mode label (e.g. "6-Color", "CMYW", "RYBW").
+        mode_str: Color mode label (e.g. "BW", "CMYW", "RYBW", "6-Color", "8-Color").
 
     Returns:
         PIL.Image.Image | None: Reference image or None on error.
@@ -1062,13 +1063,24 @@ def get_extractor_reference_image(mode_str):
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir, exist_ok=True)
 
-    if "6-Color" in mode_str or "1296" in mode_str:
+    # Determine filename and generation mode based on color system
+    if "8-Color" in mode_str:
+        filename = "ref_8color_smart.png"
+        gen_mode = "8-Color"
+    elif "6-Color" in mode_str or "1296" in mode_str:
         filename = "ref_6color_smart.png"
         gen_mode = "6-Color"
     elif "CMYW" in mode_str:
         filename = "ref_cmyw_standard.png"
         gen_mode = "CMYW"
+    elif "RYBW" in mode_str:
+        filename = "ref_rybw_standard.png"
+        gen_mode = "RYBW"
+    elif "BW" in mode_str or "Black" in mode_str:
+        filename = "ref_bw_standard.png"
+        gen_mode = "BW"
     else:
+        # Default to RYBW
         filename = "ref_rybw_standard.png"
         gen_mode = "RYBW"
 
@@ -1087,9 +1099,15 @@ def get_extractor_reference_image(mode_str):
         gap = 0
         backing = "White"
 
-        if gen_mode == "6-Color":
+        if gen_mode == "8-Color":
+            from core.calibration import generate_8color_board
+            _, img, _ = generate_8color_board(0)  # Page 1
+        elif gen_mode == "6-Color":
             from core.calibration import generate_smart_board
             _, img, _ = generate_smart_board(block_size, gap)
+        elif gen_mode == "BW":
+            from core.calibration import generate_bw_calibration_board
+            _, img, _ = generate_bw_calibration_board(block_size, gap, backing)
         else:
             from core.calibration import generate_calibration_board
             _, img, _ = generate_calibration_board(gen_mode, block_size, gap, backing)
@@ -1239,9 +1257,9 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
             with gr.Row(elem_classes=["compact-row"]):
                 components['radio_conv_color_mode'] = gr.Radio(
                     choices=[
+                        ("BW (Black & White)", "BW (Black & White)"),
                         (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
                         (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
-                        ("BW (Black & White)", "BW (Black & White)"),
                         ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
                         ("8-Color Max", "8-Color Max")
                     ],
@@ -1978,9 +1996,9 @@ def create_calibration_tab_content(lang: str) -> dict:
                 
             components['radio_cal_color_mode'] = gr.Radio(
                 choices=[
+                    ("BW (Black & White)", "BW (Black & White)"),
                     (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
                     (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
-                    ("BW (Black & White)", "BW (Black & White)"),
                     ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
                     ("8-Color Max", "8-Color Max")
                 ],
@@ -2035,12 +2053,12 @@ def create_calibration_tab_content(lang: str) -> dict:
         if "6-Color" in color_mode:
             # Call Smart 1296 generator
             return generate_smart_board(block_size, gap)
-        if "BW" in color_mode or "Black" in color_mode and "White" in color_mode:
-            # Call BW generator
+        if color_mode == "BW (Black & White)":
+            # Call BW generator (exact match to avoid matching RYBW)
             from core.calibration import generate_bw_calibration_board
             return generate_bw_calibration_board(block_size, gap, backing)
         else:
-            # Call traditional 4-color generator
+            # Call traditional 4-color generator (CMYW or RYBW)
             return generate_calibration_board(color_mode, block_size, gap, backing)
     
     cal_event = components['btn_cal_generate_btn'].click(
@@ -2080,9 +2098,9 @@ def create_extractor_tab_content(lang: str) -> dict:
                 
             components['radio_ext_color_mode'] = gr.Radio(
                 choices=[
+                    ("BW (Black & White)", "BW (Black & White)"),
                     (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
                     (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
-                    ("BW (Black & White)", "BW (Black & White)"),
                     ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
                     ("8-Color Max", "8-Color Max")
                 ],
